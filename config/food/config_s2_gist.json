@@ -1,0 +1,95 @@
+{
+    "name": "VTC_Stage2_gist",
+    "n_gpu": 1,
+
+    "arch": {
+        "type": "Stage2Model",
+        "args": {
+            "mpnet_model_name": "/home/u2120230631/codes/VTC/all-mpnet-base-v2",
+            "map_net": "/home/u2120230631/codes/VTC/workspace/checkpoints/semeval_food/stage1_final/best_model.pth",
+            "num_tokens": 4,
+            "visual_dim": 256
+        }
+    },
+    "data_loader": {
+        "type": "Stage2DataLoader",
+        "args":{
+            "data_path": "data/SemEval-Food/semeval_food.pickle.bin", 
+            "taxonomy_name": "semeval_food", 
+            "img_root_dir": "data/imgs",
+            "tokenizer_path" : "/home/u2120230631/codes/VTC/all-mpnet-base-v2",
+            "img_feat_dir": "data/img_feat",
+            "num_image_tokens": 4,
+            "batch_size": 256, 
+            "negative_size": 32,
+            "num_workers": 4,
+            "shuffle" : true
+            
+        }
+    },
+    "optimizer": {
+        "type": "AdamW",
+        "args":{
+            "lr": 5e-5,
+            "weight_decay": 0.01,
+            "amsgrad": true
+        }
+    },
+    "loss": {
+        "type": "FusedHardGISTLoss_Final",
+        "args": {
+            "margin": 0.5,
+            "use_text_guide": true,
+            "use_visual_guide": false,
+            "dirty_pos_threshold": 0.85,
+            "mining_alpha": 0.1,
+            "false_neg_ratio": 0.01,
+            "device": "cuda"
+        }
+    },
+
+    "metrics": [
+        "micro_mr",
+        "macro_mr",
+        "mrr_scaled_10",
+        "mrr",
+        
+        "hit_at_1",
+        "hit_at_5",
+        "hit_at_10",
+        "hit_at_50",
+        "hit_at_100",
+
+        "recall_at_1",
+        "recall_at_5",
+        "recall_at_10",
+        "recall_at_50",
+        "recall_at_100",
+
+        "precision_at_1",
+        "precision_at_5",
+        "precision_at_10"
+    ],
+
+    "lr_scheduler": {
+        "type": "StepLR",
+        "args": {
+            "step_size": 50,
+            "gamma": 0.1
+        }
+    },
+    "trainer": {
+        "type" : "Trainer_S2",
+        "epochs": 30,
+        "guide_model": "/home/u2120230631/codes/VTC/Qwen3-Embedding-0.6B",
+        "eval_batch_size": 256,
+        "save_dir": "saved/semeval_food/S2",
+        "save_period": 1000,
+        "verbosity": 2,
+        "monitor": "max mrr_scaled_10",
+        "early_stop": 20,
+        "tensorboard": false,
+        "mixed_precision": true,
+        "do_validation": true
+    }
+}
