@@ -41,6 +41,16 @@ class Trainer_S2(BaseTrainer):
         self.use_text_guide = config['trainer'].get('use_text_guide', True)
         self.use_visual_guide = config['trainer'].get('use_visual_guide', True)
         self.dirty_pos_threshold = config['trainer'].get('dirty_pos_threshold', 0.45)
+        
+        # self.criterion = FusedGISTContrastiveLoss_2(
+        #     margin=0.5,
+        #     use_text_guide=True,
+        #     use_visual_guide=False,
+        #     # 这里的阈值一定要注意，建议从 0.6 开始试
+        #     dirty_pos_threshold=0.45, 
+        #     guide_model_name=self.guide_model,
+        #     device=device
+        # )
 
         self.validation_steps = config['trainer'].get('validation_steps', 50) 
 
@@ -76,12 +86,12 @@ class Trainer_S2(BaseTrainer):
         self.logger.info(f"Test loaders created. Queries: {len(query_dataset)}, Candidates: {self.eval_candidate_info['count']}")
 
 
-        if self.criterion.use_text:
-            self.logger.info("Initializing Text Guide (One-off Pre-computation)...")
-            self._precompute_guide_embeddings()
-        else:
-            self.guide_q_emb = None
-            self.guide_pos_map = None
+        # if self.criterion.use_text:
+        #     self.logger.info("Initializing Text Guide (One-off Pre-computation)...")
+        #     self._precompute_guide_embeddings()
+        # else:
+        #     self.guide_q_emb = None
+        #     self.guide_pos_map = None
 
     def _precompute_guide_embeddings(self):
         """
@@ -89,21 +99,11 @@ class Trainer_S2(BaseTrainer):
         启用 Flash Attention 2 加速。
         """
         model_name = self.guide_model.split("/")[-1] if self.guide_model else "Qwen3-Embedding-0.6B"
-        self.logger.info(f">>> [Pre-compute] Initializing Guide Model ({model_name}) with FA2...")
+        self.logger.info(f">>> [Pre-compute] Initializing Guide Model ({model_name}")
         
-        # 加载模型: 启用 Flash Attention 2 和 FP16
-        # 注意: 需要 GPU 支持 (Ampere架构如 3090/4090/A100)
-        try:
-            model = SentenceTransformer(
-                self.guide_model,
-                trust_remote_code=True,
-                device=self.device,
-                model_kwargs={"dtype": "bfloat16"}
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to init with FA2: {e}. Fallback to default settings.")
-            model = SentenceTransformer(guide_model_name, trust_remote_code=True, device=self.device)
-            model.half() # 尝试转半精度
+
+        model = SentenceTransformer(self.guide_model, trust_remote_code=True, device=self.device)
+        # model.half() # 尝试转半精度
             
         # Evaluation mode (SentenceTransformer 默认 eval)
         
@@ -224,13 +224,15 @@ class Trainer_S2(BaseTrainer):
         
         for batch_idx, batch in enumerate(pbar):
             batch_dev = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-            batch_dev['pos_id_pair'] = batch['pos_id_pair'] 
+            batch_dev['pos_id_pair'] = batch['pos_id_pair']
+            batch_dev['q_text_raw'] = batch['q_text_raw']
+            batch_dev['pos_text_raw'] = batch['pos_text_raw']
 
             self.optimizer.zero_grad()
-            with autocast(enabled=self.use_amp, device_type='cuda'):
+            with autocast(enabled=self.use_amp, device_type='cuda'):  
                 q_emb, c_emb = self.model(batch_dev)
-                loss = self.criterion(q_emb, c_emb, batch_dev)
-
+                loss = self.criterion(q_emb, c_emb, batch_dev['label'])
+                # loss, metrics = self.criterion(q_emb, c_emb, batch_dev)
             
             self.scaler.scale(loss).backward()          
             self.scaler.step(self.optimizer)
@@ -242,12 +244,25 @@ class Trainer_S2(BaseTrainer):
             # log
             self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
             self.train_metrics.update('loss', loss.item())
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
-            if batch_idx % self.log_step == 0: 
-                self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
-                    epoch,
-                    self._progress(batch_idx),
-                    loss.item()))
+            # if batch_idx % self.log_step == 0: 
+            #     self.logger.info(f"\n[Step {batch_idx}] Analysis:")
+            #     self.logger.info(f"  > Positive Data: Total {metrics['total_pos']}, Dropped {metrics['drop_pos_count']} "
+            #         f"({metrics['pos_drop_rate']*100:.1f}%)")
+            #     self.logger.info(f"  > Negative Data: Total {metrics['total_neg']}, Dropped {metrics['drop_neg_count']} "
+            #         f"({metrics['neg_drop_rate']*100:.1f}%)")
+                
+            #     # 深入分析负例被删原因
+            #     if metrics['drop_neg_count'] > 0:
+            #         self.logger.info(f"    - Text  Guide Blamed: {metrics['drop_neg_text']}")
+            #         self.logger.info(f"    - Visual Guide Blamed: {metrics['drop_neg_vis']}")
+                
+            #     self.logger.info(f"  > Final Mining: Active Pos {metrics['active_hard_pos']}, Active Neg {metrics['active_hard_neg']}")
+            #     self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
+            #         epoch,
+            #         self._progress(batch_idx),
+            #         loss.item()))
                 
             if epoch > 5 and (batch_idx + 1) % self.validation_steps == 0 and batch_idx > 0:
                 self.logger.info(f"--- Running validation at step {batch_idx + 1} ---")

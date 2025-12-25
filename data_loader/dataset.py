@@ -1247,6 +1247,16 @@ class Dataset_Stage2(RawDataset):
         c_seg_end = self.c_segs[6] + self.sep_token
         
         
+        q_text_raw = f'Query Node: Definition: {q_desc}'
+        # 2. Position Raw Text
+        
+        pos_text_raw = (
+            f'Parent Node: Definition: {p_desc}; '
+            f'Child Node: Definition: {c_desc}; '
+            f'Sibling Node: Definition: {s_desc}'
+        )
+        
+        
         # Return a flat dictionary containing all necessary info for one pair
         return {
             # Query Inputs
@@ -1264,7 +1274,10 @@ class Dataset_Stage2(RawDataset):
             'query_id': query_node_id,
             'pos_id_pair': (p_id, c_id),
             
-            'label': torch.tensor(label, dtype=torch.float)
+            'label': torch.tensor(label, dtype=torch.float),
+            
+            'q_text_raw': q_text_raw,
+            'pos_text_raw': pos_text_raw
         }
         
     def _get_k_negatives(self, query_node, negative_size, ignore=[]):

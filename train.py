@@ -42,25 +42,44 @@ def main(config):
 
     # get function handles of loss and metrics
     # function 
-    # criterion = getattr(module_loss, config['loss'])
+    criterion = getattr(module_loss, config['loss'])
     # class
-    criterion = config.init_obj('loss', module_loss)
+    # criterion = config.init_obj('loss', module_loss)
     
     
     metrics = [getattr(module_metric, met) for met in config['metrics']]
 
     # build optimizer, learning rate scheduler. delete every lines containing lr_scheduler for disabling scheduler
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+    base_lr = config['optimizer']['args']['lr']
     
-    # param_optimizer = list(model.named_parameters())
-    # no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-    # optimizer_grouped_parameters = [
-    #     {
-    #         "params": [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
-    #         "weight_decay": config['optimizer']['args']['weight_decay'],
-    #     },
-    #     {"params": [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
-    # ]
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        # Group 1: Backbone, with decay
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay) and "gate_fc" not in n and "mapping_net" not in n],
+            "weight_decay": config['optimizer']['args'].get('weight_decay', 0.01),
+            "lr": base_lr,
+        },
+        # Group 2: Backbone, no decay (bias, layernorm)
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) and "gate_fc" not in n and "mapping_net" not in n],
+            "weight_decay": 0.0,
+            "lr": base_lr,
+        },
+        # Group 3: Head (Gate/Map), High LR, with decay
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay) and ("gate_fc" in n or "mapping_net" in n)],
+            "weight_decay": config['optimizer']['args'].get('weight_decay', 0.01),
+            "lr": base_lr * 2,
+        },
+        # Group 4: Head (Gate/Map), High LR, no decay
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) and ("gate_fc" in n or "mapping_net" in n)],
+            "weight_decay": 0.0,
+            "lr": base_lr * 2,
+        },
+]
     
     optimizer = config.init_obj('optimizer', torch.optim, trainable_params)
     # lr_scheduler = config.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimizer)

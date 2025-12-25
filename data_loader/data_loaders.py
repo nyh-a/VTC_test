@@ -158,7 +158,9 @@ def collate_fn_stage2(batch):
         
     out['pos_id_pair'] = [x['pos_id_pair'] for x in batch]
     out['query_id'] = torch.tensor([x['query_id'] for x in batch], dtype=torch.long)
-        
+    
+    out['q_text_raw'] = [x['q_text_raw'] for x in batch]
+    out['pos_text_raw'] = [x['pos_text_raw'] for x in batch]
     return out
     
 

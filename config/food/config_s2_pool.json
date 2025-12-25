@@ -1,5 +1,5 @@
 {
-    "name": "VTC_Stage2_gist",
+    "name": "VTC_Stage2_pooling",
     "n_gpu": 1,
 
     "arch": {
@@ -8,7 +8,9 @@
             "mpnet_model_name": "/home/u2120230655/codes/VTC/all-mpnet-base-v2",
             "map_net": "/home/u2120230655/codes/VTC/work/VTC_new/checkpoints/semeval_food/stage1_final/best_model.pth",
             "num_tokens": 4,
-            "visual_dim": 256
+            "visual_dim": 256,
+            "fusion_mode": "gated",
+            "static_alpha": 1.0
         }
     },
     "data_loader": {
@@ -35,17 +37,7 @@
             "amsgrad": true
         }
     },
-    "loss": {
-        "type": "FusedHardGISTLoss_Final",
-        "args": {
-            "margin": 0.5,
-            "mining_alpha": 0.1,
-            "use_text_guide": true,
-            "use_visual_guide": false,
-            "dirty_pos_threshold": 0.6,
-            "device": "cuda"
-        }
-    },
+    "loss": "OnlineContrastiveLoss",
 
     "metrics": [
         "micro_mr",
@@ -79,8 +71,8 @@
     },
     "trainer": {
         "type" : "Trainer_S2",
+        "margin": 0.5,
         "epochs": 30,
-        "guide_model": "/home/u2120230655/codes/VTC/Qwen3-Embedding-0.6B",
         "eval_batch_size": 256,
         "save_dir": "saved/semeval_food/S2",
         "save_period": 1000,

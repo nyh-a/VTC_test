@@ -239,19 +239,34 @@ class TaxonomyMappingModel_F(nn.Module):
 
 
 class Stage2Model(nn.Module):
-    def __init__(self, mpnet_model_name, map_net="", num_tokens=4, visual_dim=256):
+    def __init__(self, mpnet_model_name, map_net="", num_tokens=4, visual_dim=256,
+                 fusion_mode='gated', static_alpha=1.0, visual_boost=3.0):
         super().__init__()
         
         print(f"Stage 2: Loading MPNet from {mpnet_model_name}...")
+        
         self.mpnet = AutoModel.from_pretrained(mpnet_model_name)
         self.text_dim = self.mpnet.config.hidden_size
         self.num_tokens = num_tokens
+        self.fusion_mode = fusion_mode
+        self.static_alpha = static_alpha
+        print(f"Stage 2 Model Init | Mode: [{self.fusion_mode}] | Alpha: {self.static_alpha}")
         
         # Mapping Net (随机初始化)
         self.mapping_net = IM2TEXT_MLP(visual_dim, self.text_dim, num_tokens)
-
         if map_net:
             self.load_stage1_weights(map_net)
+            
+        # Gated Fusion
+        if self.fusion_mode == 'gated':
+            self.gate_fc = nn.Linear(self.text_dim * 2, 1)
+            nn.init.constant_(self.gate_fc.bias, -5)
+            nn.init.xavier_uniform_(self.gate_fc.weight)
+        else:
+            self.gate_fc = None
+        
+        self.visual_boost = nn.Parameter(torch.tensor(visual_boost)) 
+        
 
     def load_stage1_weights(self, ckpt_path):
         """从 Stage 1 Checkpoint 加载 Mapping Network"""
@@ -279,6 +294,77 @@ class Stage2Model(nn.Module):
         token_embeddings = model_output.last_hidden_state
         input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
         return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    
+    
+    def _naive_pooling(self, last_hidden_state, attention_mask):
+        """
+        Mode 2: Naive Mean Pooling
+        不管是文本还是图片，一视同仁地平均 (导致 Semantic Drowning)
+        """
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+        sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        return sum_embeddings / sum_mask
+
+    def _separated_pooling(self, last_hidden_state, text_mask, img_mask):
+        """
+        Helper: 分别对文本和图片区域进行 Pooling
+        """
+        text_mask_exp = text_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+        img_mask_exp = img_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+
+        # Text Part
+        text_emb = torch.sum(last_hidden_state * text_mask_exp, dim=1) / torch.clamp(text_mask_exp.sum(1), min=1e-9)
+        
+        # Image Part (如果 img_mask 全为0，这里会得到 0 向量)
+        img_emb = torch.sum(last_hidden_state * img_mask_exp, dim=1) / torch.clamp(img_mask_exp.sum(1), min=1e-9)
+
+        return text_emb, img_emb
+
+    def _apply_fusion(self, last_hidden_state, att_mask, full_text_mask, full_img_mask):
+        """
+        核心调度函数：根据 fusion_mode 选择不同的处理路径
+        """
+        # --- Mode 2: Naive ---
+        if self.fusion_mode == 'naive':
+            return self._naive_pooling(last_hidden_state, att_mask)
+
+        # 剩下三种模式都需要先分离特征
+        raw_text_emb, raw_img_emb = self._separated_pooling(last_hidden_state, full_text_mask, full_img_mask)
+        
+        # norm
+        text_emb = F.normalize(raw_text_emb, p=2, dim=1)
+        img_emb = F.normalize(raw_img_emb, p=2, dim=1)
+        
+
+        # --- Mode 1: Text Only ---
+        if self.fusion_mode == 'text_only':
+            # 即使 Transformer 内部看见了图片，我们在最后强制丢弃图片特征
+            return text_emb
+
+        # --- Mode 3: Static Weighted ---
+        elif self.fusion_mode == 'static':
+            # 简单的加权残差: T + alpha * I
+            return text_emb + self.static_alpha * img_emb
+
+        # --- Mode 4: Gated (Ours) ---
+        elif self.fusion_mode == 'gated':
+            cnt_text = full_text_mask.sum(dim=1, keepdim=True) # [B, 1], e.g., 50
+            cnt_img  = full_img_mask.sum(dim=1, keepdim=True)  # [B, 1], e.g., 4
+            
+            # 真正的 Baseline (Global Mean Pooling 的方向)
+            # 公式: (Mean_Text * Count_Text + Mean_Img * Count_Img)
+            # 这等价于 Sum_Text + Sum_Img，也就是所有 Token 的总和
+            base_emb = raw_text_emb * cnt_text + raw_img_emb * cnt_img
+            
+            
+            gate_input = torch.cat([text_emb, img_emb], dim=1)
+            gate = torch.sigmoid(self.gate_fc(gate_input))
+            # print(f"Gate Stats | Mean: {gate.mean().item():.4f} | Std: {gate.std().item():.4f}")
+            return base_emb + gate * raw_img_emb * self.visual_boost
+        
+        else:
+            raise ValueError(f"Unknown fusion mode: {self.fusion_mode}")
 
     def encode_query(self, batch):
         """
@@ -302,7 +388,16 @@ class Stage2Model(nn.Module):
         
         # 4. Forward
         out = self.mpnet(inputs_embeds=input_embeds, attention_mask=att_mask)
-        return self._pooling(out, att_mask)
+        
+        # 构建 Separated Mask (为了 mode != naive)
+        zeros_start = torch.zeros_like(batch['q_seg_start_mask'])
+        zeros_end = torch.zeros_like(batch['q_seg_end_mask'])
+        full_img_mask = torch.cat([zeros_start, tok_mask, zeros_end], dim=1)
+        full_text_mask = att_mask - full_img_mask
+        
+        final_emb = self._apply_fusion(out.last_hidden_state, att_mask, full_text_mask, full_img_mask)
+        
+        return final_emb
 
     def encode_candidate(self, batch):
         """
@@ -335,7 +430,19 @@ class Stage2Model(nn.Module):
         
         # 4. Forward
         out = self.mpnet(inputs_embeds=input_embeds, attention_mask=att_mask)
-        return self._pooling(out, att_mask)
+        
+        # 构建 Separated Mask
+        zp = torch.zeros_like(batch['c_seg_p_mask'])
+        zc = torch.zeros_like(batch['c_seg_c_mask'])
+        zs = torch.zeros_like(batch['c_seg_s_mask'])
+        ze = torch.zeros_like(batch['c_seg_end_mask'])
+        
+        full_img_mask = torch.cat([zp, tm, zc, tm, zs, tm, ze], dim=1)
+        full_text_mask = att_mask - full_img_mask
+        
+        final_emb = self._apply_fusion(out.last_hidden_state, att_mask, full_text_mask, full_img_mask)
+        return final_emb
+        
 
     def forward(self, batch):
         # Dual Encoder Forward
